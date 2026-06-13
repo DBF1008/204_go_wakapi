@@ -84,14 +84,24 @@ func (srv *MiscService) Schedule() {
 
 func (srv *MiscService) CountTotalTime() {
 	slog.Info("counting users total time")
+
+	// Enforce strict single-instance execution. The whole counting pipeline below
+	// is asynchronous (per-user aggregation runs on worker goroutines and the result
+	// is persisted from a detached goroutine), so the lock must be held for the
+	// entire pipeline, not just this function body. We therefore acquire it here and
+	// release it from the persistence goroutine once everything has settled. If a
+	// previous run is still in flight, skip this scheduled invocation entirely
+	// instead of unlocking a mutex we never acquired (which would panic and break
+	// mutual exclusion) and running a duplicate count.
 	if ok := countLock.TryLock(); !ok {
 		config.Log().Warn("couldn't acquire lock for counting users total time, job is still pending")
+		return
 	}
-	defer countLock.Unlock()
 
 	users, err := srv.userService.GetAll()
 	if err != nil {
 		config.Log().Error("failed to fetch users for time counting", "error", err)
+		countLock.Unlock()
 		return
 	}
 
@@ -110,9 +120,12 @@ func (srv *MiscService) CountTotalTime() {
 		}
 	}
 
-	// persist
+	// persist (asynchronously, so the single-worker default queue isn't blocked for
+	// the entire aggregation window); releasing the single-instance lock only once
+	// the aggregation has completed or timed out and the result has been persisted.
 	go func(wg *sync.WaitGroup) {
-		if !utils.WaitTimeout(&pendingJobs, 2*countUsersEvery) {
+		defer countLock.Unlock()
+		if !utils.WaitTimeout(wg, 2*countUsersEvery) {
 			if err := srv.keyValueService.PutString(&models.KeyStringValue{
 				Key:   config.KeyLatestTotalTime,
 				Value: totalTime.Load().String(),
