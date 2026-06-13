@@ -28,7 +28,6 @@ const (
 )
 
 var countLock = sync.Mutex{}
-var firstDataLock = sync.Mutex{}
 
 type MiscService struct {
 	config           *config.Config
@@ -86,12 +85,13 @@ func (srv *MiscService) CountTotalTime() {
 	slog.Info("counting users total time")
 	if ok := countLock.TryLock(); !ok {
 		config.Log().Warn("couldn't acquire lock for counting users total time, job is still pending")
+		return
 	}
-	defer countLock.Unlock()
 
 	users, err := srv.userService.GetAll()
 	if err != nil {
 		config.Log().Error("failed to fetch users for time counting", "error", err)
+		countLock.Unlock()
 		return
 	}
 
@@ -112,6 +112,7 @@ func (srv *MiscService) CountTotalTime() {
 
 	// persist
 	go func(wg *sync.WaitGroup) {
+		defer countLock.Unlock()
 		if !utils.WaitTimeout(&pendingJobs, 2*countUsersEvery) {
 			if err := srv.keyValueService.PutString(&models.KeyStringValue{
 				Key:   config.KeyLatestTotalTime,
