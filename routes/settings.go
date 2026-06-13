@@ -835,19 +835,46 @@ func (h *SettingsHandler) actionClearData(w http.ResponseWriter, r *http.Request
 	slog.Info("user requested to delete all data", "userID", user.ID)
 
 	go func(user *models.User, r *http.Request) {
+		// track whether every deletion succeeded; only then is it safe to converge the
+		// user's metadata to a "no data" state. a single failure is isolated (logged and
+		// skipped) but must not flip the flag, since data may still be present.
+		dataCleared := true
+
 		slog.Info("deleting summaries for user", "userID", user.ID)
 		if err := h.summarySrvc.DeleteByUser(user.ID); err != nil {
+			dataCleared = false
 			conf.Log().Request(r).Error("failed to clear summaries", "error", err)
 		}
 
 		slog.Info("deleting durations for user", "userID", user.ID)
 		if err := h.durationSrvc.DeleteByUser(user); err != nil {
+			dataCleared = false
 			conf.Log().Request(r).Error("failed to clear durations", "error", err)
 		}
 
 		slog.Info("deleting heartbeats for user", "userID", user.ID)
 		if err := h.heartbeatSrvc.DeleteByUser(user); err != nil {
+			dataCleared = false
 			conf.Log().Request(r).Error("failed to clear heartbeats", "error", err)
+		}
+
+		if !dataCleared {
+			// leave has_data untouched so housekeeping and other consumers keep treating
+			// the account as having data until a later clear / retry fully converges it
+			conf.Log().Request(r).Warn("skipping 'has_data' reset because not all data could be cleared", "userID", user.ID)
+			return
+		}
+
+		// data is fully gone: write back the user metadata to a consistent state. Update()
+		// persists has_data, flushes the user cache and emits the user-update event, so all
+		// derived state (inactive-user cleanup, settings view, etc.) converges accordingly.
+		if user.HasData {
+			user.HasData = false
+			if _, err := h.userSrvc.Update(user); err != nil {
+				conf.Log().Request(r).Error("failed to reset 'has_data' flag for user", "userID", user.ID, "error", err)
+			} else {
+				slog.Info("reset 'has_data' flag for user after clearing data", "userID", user.ID)
+			}
 		}
 	}(user, r)
 
