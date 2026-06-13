@@ -18,11 +18,13 @@ import (
 const (
 	tplNamePasswordReset               = "reset_password"
 	tplNameImportNotification          = "import_finished"
+	tplNameImportFailureNotification   = "import_failed"
 	tplNameWakatimeFailureNotification = "wakatime_connection_failure"
 	tplNameReport                      = "report"
 	tplNameSubscriptionNotification    = "subscription_expiring"
 	subjectPasswordReset               = "Wakapi - Password Reset"
 	subjectImportNotification          = "Wakapi - Data Import Finished"
+	subjectImportFailureNotification   = "Wakapi - Data Import Failed"
 	subjectWakatimeFailureNotification = "Wakapi - WakaTime Connection Failure"
 	subjectReport                      = "Wakapi - Report from %s"
 	subjectSubscriptionNotification    = "Wakapi - Subscription expiring / expired"
@@ -109,6 +111,23 @@ func (m *MailService) SendImportNotification(recipient *models.User, duration ti
 	return m.sendingService.Send(mail)
 }
 
+func (m *MailService) SendImportFailureNotification(recipient *models.User, reason string) error {
+	tpl, err := m.getImportFailureNotificationTemplate(ImportFailureNotificationTplData{
+		PublicUrl: m.config.Server.PublicUrl,
+		Reason:    reason,
+	})
+	if err != nil {
+		return err
+	}
+	mail := &models.Mail{
+		From:    models.MailAddress(m.config.Mail.Sender),
+		To:      models.MailAddresses([]models.MailAddress{models.MailAddress(recipient.Email)}),
+		Subject: subjectImportFailureNotification,
+	}
+	mail.WithHTML(tpl.String())
+	return m.sendingService.Send(mail)
+}
+
 func (m *MailService) SendReport(recipient *models.User, report *models.Report) error {
 	tpl, err := m.getReportTemplate(ReportTplData{report})
 	if err != nil {
@@ -161,6 +180,14 @@ func (m *MailService) getWakatimeFailureNotificationTemplate(data WakatimeFailur
 func (m *MailService) getImportNotificationTemplate(data ImportNotificationTplData) (*bytes.Buffer, error) {
 	var rendered bytes.Buffer
 	if err := m.templates[m.fmtName(tplNameImportNotification)].Execute(&rendered, data); err != nil {
+		return nil, err
+	}
+	return &rendered, nil
+}
+
+func (m *MailService) getImportFailureNotificationTemplate(data ImportFailureNotificationTplData) (*bytes.Buffer, error) {
+	var rendered bytes.Buffer
+	if err := m.templates[m.fmtName(tplNameImportFailureNotification)].Execute(&rendered, data); err != nil {
 		return nil, err
 	}
 	return &rendered, nil

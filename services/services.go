@@ -102,6 +102,7 @@ type IMailService interface {
 	SendPasswordReset(*models.User, string) error
 	SendWakatimeFailureNotification(*models.User, int) error
 	SendImportNotification(*models.User, time.Duration, int) error
+	SendImportFailureNotification(*models.User, string) error
 	SendReport(*models.User, *models.Report) error
 	SendSubscriptionNotification(*models.User, bool) error
 }

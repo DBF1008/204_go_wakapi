@@ -26,6 +26,11 @@ func (m *MailServiceMock) SendImportNotification(user *models.User, duration tim
 	return args.Error(0)
 }
 
+func (m *MailServiceMock) SendImportFailureNotification(user *models.User, reason string) error {
+	args := m.Called(user, reason)
+	return args.Error(0)
+}
+
 func (m *MailServiceMock) SendReport(user *models.User, report *models.Report) error {
 	args := m.Called(user, report)
 	return args.Error(0)

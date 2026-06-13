@@ -12,6 +12,11 @@ type ImportNotificationTplData struct {
 	NumHeartbeats int
 }
 
+type ImportFailureNotificationTplData struct {
+	PublicUrl string
+	Reason    string
+}
+
 type WakatimeFailureNotificationNotificationTplData struct {
 	PublicUrl   string
 	NumFailures int

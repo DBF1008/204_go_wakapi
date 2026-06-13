@@ -699,6 +699,7 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 	useLegacyImporter, _ := strconv.ParseBool(r.PostFormValue("use_legacy_importer"))
 	kvKeyLastImport := fmt.Sprintf("%s_%s", conf.KeyLastImport, user.ID)
 	kvKeyLastImportSuccess := fmt.Sprintf("%s_%s", conf.KeyLastImportSuccess, user.ID)
+	kvKeyLastImportFailure := fmt.Sprintf("%s_%s", conf.KeyLastImportFailure, user.ID)
 
 	importer := imports.NewWakatimeImporter(user.WakatimeApiKey, useLegacyImporter)
 	if err := importer.Validate(user); err != nil {
@@ -730,6 +731,28 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 	go func(user *models.User, importer *imports.WakatimeImporter, r *http.Request) {
 		start := time.Now()
 
+		// Record import failure marker at the start – this indicates an import was
+		// attempted but has not yet completed successfully. It will be deleted on
+		// success, or updated with a reason on failure.
+		h.keyValueSrvc.PutString(&models.KeyStringValue{
+			Key:   kvKeyLastImportFailure,
+			Value: time.Now().Format(time.RFC822),
+		})
+
+		// sendFailure records the failure in KV and notifies the user by email.
+		sendFailure := func(reason string) {
+			conf.Log().Error("wakatime import for user failed", "userID", user.ID, "reason", reason)
+			h.keyValueSrvc.PutString(&models.KeyStringValue{
+				Key:   kvKeyLastImportFailure,
+				Value: fmt.Sprintf("%s|%s", time.Now().Format(time.RFC822), reason),
+			})
+			if user.Email != "" {
+				if err := h.mailSrvc.SendImportFailureNotification(user, reason); err != nil {
+					conf.Log().Error("failed to send import failure mail", "userID", user.ID, "error", err)
+				}
+			}
+		}
+
 		countBefore, _ := h.heartbeatSrvc.CountByUser(user)
 
 		var (
@@ -743,53 +766,73 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 			stream, importError = importer.Import(user, latest.Time.T(), time.Now())
 		}
 		if importError != nil {
-			conf.Log().Error("wakatime import for user failed", "userID", user.ID, "error", importError)
+			sendFailure(fmt.Sprintf("failed to connect to WakaTime API: %v", importError))
 			return
 		}
-
-		// import successful
-		h.keyValueSrvc.PutString(&models.KeyStringValue{
-			Key:   kvKeyLastImportSuccess,
-			Value: time.Now().Format(time.RFC822),
-		})
 
 		count := 0
 		batch := make([]*models.Heartbeat, 0, h.config.App.ImportBatchSize)
 
-		insert := func(batch []*models.Heartbeat) {
+		insert := func(batch []*models.Heartbeat) error {
 			if err := h.heartbeatSrvc.InsertBatch(batch); err != nil {
 				slog.Warn("failed to insert imported heartbeat, already existing?", "error", err)
+				return err
 			}
+			return nil
 		}
 
+		var insertErrors int
 		for hb := range stream {
 			count++
 			batch = append(batch, hb)
 
 			if len(batch) == h.config.App.ImportBatchSize {
-				insert(batch)
+				if err := insert(batch); err != nil {
+					insertErrors++
+				}
 				batch = make([]*models.Heartbeat, 0, h.config.App.ImportBatchSize)
 			}
 		}
 		if len(batch) > 0 {
-			insert(batch)
+			if err := insert(batch); err != nil {
+				insertErrors++
+			}
 		}
 
 		countAfter, _ := h.heartbeatSrvc.CountByUser(user)
 		slog.Info("downloaded heartbeats for user", "count", count, "userID", user.ID, "importedCount", countAfter-countBefore)
 
-		h.regenerateSummaries(user)
+		// If every batch insert failed, treat the import as failed – do not wipe
+		// summaries or mark success.
+		if count > 0 && insertErrors > 0 && countAfter == countBefore {
+			sendFailure(fmt.Sprintf("all %d heartbeat insert batches failed, no data persisted", insertErrors))
+			return
+		}
+
+		// Regenerate summaries from the newly imported data.
+		if err := h.regenerateSummaries(user); err != nil {
+			sendFailure(fmt.Sprintf("summary regeneration failed: %v", err))
+			return
+		}
 
 		if !user.HasData {
 			user.HasData = true
 			if _, err := h.userSrvc.Update(user); err != nil {
-				conf.Log().Request(r).Error("failed to set 'has_data' flag for user", "userID", user.ID, "error", err)
+				conf.Log().Error("failed to set 'has_data' flag for user", "userID", user.ID, "error", err)
 			}
 		}
 
+		// All core import steps completed successfully – only now record success
+		// and clear the failure marker.
+		h.keyValueSrvc.PutString(&models.KeyStringValue{
+			Key:   kvKeyLastImportSuccess,
+			Value: time.Now().Format(time.RFC822),
+		})
+		h.keyValueSrvc.DeleteString(kvKeyLastImportFailure)
+
 		if user.Email != "" {
 			if err := h.mailSrvc.SendImportNotification(user, time.Now().Sub(start), int(countAfter-countBefore)); err != nil {
-				conf.Log().Request(r).Error("failed to send import notification mail", "userID", user.ID, "error", err)
+				conf.Log().Error("failed to send import notification mail", "userID", user.ID, "error", err)
 			} else {
 				slog.Info("sent import notification mail", "userID", user.ID)
 			}

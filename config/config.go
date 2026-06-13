@@ -41,6 +41,7 @@ const (
 	KeyLatestTotalUsers             = "latest_total_users"
 	KeyLastImport                   = "last_import"            // import attempt
 	KeyLastImportSuccess            = "last_successful_import" // last actual successful import
+	KeyLastImportFailure            = "last_failed_import"     // last failed or partially-failed import
 	KeySubscriptionNotificationSent = "sub_reminder"
 	KeyNewsbox                      = "newsbox"
 	KeyInviteCode                   = "invite"
