@@ -1,0 +1,121 @@
+package v1
+
+import (
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/duke-git/lancet/v2/stream"
+
+	"github.com/muety/wakapi/models"
+)
+
+type HeartbeatsViewModel struct {
+	Data []*HeartbeatEntry `json:"data"`
+}
+
+type HeartbeatResponseViewModel struct {
+	Responses [][]interface{} `json:"responses"`
+}
+
+type HeartbeatCreationResult struct {
+	Data   *HeartbeatResponseData
+	Status int
+}
+
+type HeartbeatCreationResults []*HeartbeatCreationResult
+
+func (l HeartbeatCreationResults) All() bool {
+	return stream.FromSlice(l).AllMatch(func(r *HeartbeatCreationResult) bool {
+		return r.Status >= 200 && r.Status < 300
+	})
+}
+
+func (l HeartbeatCreationResults) None() bool {
+	return stream.FromSlice(l).AllMatch(func(r *HeartbeatCreationResult) bool {
+		return r.Status < 200 || r.Status >= 300
+	})
+}
+
+var HeartbeatSuccess = &HeartbeatCreationResult{
+	Status: http.StatusCreated,
+	Data: &HeartbeatResponseData{
+		Data:  nil, // see comment in struct declaration for details
+		Error: nil,
+	},
+}
+
+type HeartbeatResponseData struct {
+	// response data actually looks like this: https://pastr.de/p/nyf6kj2e6843fbw4xkj4h4pj
+	// however, for simplicity, we only implement the top-level fields (and the status code at index 1) and leave them empty
+	// neither cli, now the browser plugin require these fields to hold any actual content, see:
+	// - https://github.com/wakatime/wakatime-cli/blob/660b2b9702f3bc598e96cb8b8e9f459a6c2928c3/pkg/api/heartbeat.go#L152
+	// - https://github.com/wakatime/wakatime-cli/blob/660b2b9702f3bc598e96cb8b8e9f459a6c2928c3/cmd/heartbeat/heartbeat.go#L151
+	// - https://github.com/wakatime/browser-wakatime/blob/77d0963d93552756f52e72ed57f0d2f6f7d6239f/src/core/WakaTimeCore.ts#L208
+	Data  interface{} `json:"data"`
+	Error interface{} `json:"error"`
+}
+
+// Incomplete, for now, only the subset of fields is implemented
+// that is actually required for the import
+
+type HeartbeatEntry struct {
+	Id               string    `json:"id"`
+	Branch           string    `json:"branch"`
+	Category         string    `json:"category"`
+	Entity           string    `json:"entity"`
+	IsWrite          bool      `json:"is_write"`
+	Language         string    `json:"language"`
+	Project          string    `json:"project"`
+	Time             float64   `json:"time"`
+	Type             string    `json:"type"`
+	UserId           string    `json:"user_id"`
+	MachineNameId    string    `json:"machine_name_id"`
+	UserAgentId      string    `json:"user_agent_id"`
+	Lines            int       `json:"lines"`
+	LineNo           int       `json:"lineno"`
+	CursorPos        int       `json:"cursorpos"`
+	LineDeletions    int       `json:"line_deletions"`
+	LineAdditions    int       `json:"line_additions"`
+	CreatedAt        time.Time `json:"created_at"`
+	AILineChanges    int       `json:"ai_line_changes"`
+	AISession        string    `json:"ai_session"`
+	AIInputTokens    int       `json:"ai_input_tokens"`
+	AIOutputTokens   int       `json:"ai_output_tokens"`
+	AIPromptLength   int       `json:"ai_prompt_length"`
+	HumanLineChanges int       `json:"human_line_changes"`
+}
+
+func HeartbeatsToCompat(entries []*models.Heartbeat) []*HeartbeatEntry {
+	out := make([]*HeartbeatEntry, len(entries))
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		out[i] = &HeartbeatEntry{
+			Id:               strconv.FormatUint(entry.ID, 10),
+			Branch:           entry.Branch,
+			Category:         entry.Category,
+			Entity:           entry.Entity,
+			IsWrite:          entry.IsWrite,
+			Language:         entry.Language,
+			Project:          entry.Project,
+			Time:             float64(entry.Time.T().Unix()),
+			Type:             entry.Type,
+			UserId:           entry.UserID,
+			MachineNameId:    entry.Machine,
+			UserAgentId:      entry.UserAgent,
+			Lines:            entry.Lines,
+			LineNo:           entry.LineNo,
+			LineAdditions:    entry.LineAdditions,
+			LineDeletions:    entry.LineDeletions,
+			CursorPos:        entry.CursorPos,
+			CreatedAt:        entry.CreatedAt.T(),
+			AILineChanges:    entry.AILineChanges,
+			AISession:        entry.AISession,
+			AIInputTokens:    entry.AIInputTokens,
+			AIOutputTokens:   entry.AIOutputTokens,
+			AIPromptLength:   entry.AIPromptLength,
+			HumanLineChanges: entry.HumanLineChanges,
+		}
+	}
+	return out
+}

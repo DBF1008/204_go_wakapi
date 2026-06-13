@@ -1,0 +1,52 @@
+meta {
+  name: Create heartbeats (get heartbeats test)
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{BASE_URL}}/api/heartbeat
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{WRITEUSER_TOKEN}}
+}
+
+body:json {
+  [{
+      "entity": "/home/user1/dev/project1/main.go",
+      "project": "wakapi",
+      "language": "Go",
+      "is_write": true,
+      "type": "file",
+      "category": null,
+      "branch": null,
+      "time": {{tsStartOfYesterday}}
+  },
+  {
+      "entity": "/home/user1/dev/project1/main.go",
+      "project": "wakapi",
+      "language": "Go",
+      "is_write": true,
+      "type": "file",
+      "category": null,
+      "branch": null,
+      "time": {{tsLateNightYesterday}}
+  },
+  {
+      "entity": "/home/user1/dev/project1/main.go",
+      "project": "wakapi",
+      "language": "Go",
+      "is_write": true,
+      "type": "file",
+      "category": null,
+      "branch": null,
+      "time": {{tsStartOfDay}}
+  }]
+}
+
+assert {
+  res.status: eq 201
+}

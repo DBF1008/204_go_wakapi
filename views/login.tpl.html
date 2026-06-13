@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+
+{{ template "head.tpl.html" . }}
+
+<script type="module" src="assets/vendor/simplewebauthn.umd.min.js"></script>
+<script src="assets/js/login.js"></script>
+<body class="bg-background text-muted p-4 pt-10 flex flex-col min-h-screen max-w-screen-lg mx-auto justify-center">
+
+{{ template "header.tpl.html" . }}
+
+{{ template "alerts.tpl.html" . }}
+
+<main class="mt-10 grow flex justify-center w-full">
+    <div class="grow max-w-lg mt-10">
+        <div class="mb-8">
+            <h1 class="h1">Welcome!</h1>
+            <span class="text-secondary">Log in to continue using Wakapi. First time? Check out the <a href="setup" class="text-foreground hover:text-secondary">setup instructions</a>.</span>
+        </div>
+        {{ if not .DisableLocalAuth }}
+        <form action="login" method="post" class="mb-8">
+            <div class="font-semibold mb-2 text-secondary">Local Sign-On</div>
+            <div class="mb-4">
+                <input class="input-default"
+                       type="text" id="username" autocomplete="username"
+                       name="username" placeholder="Username" minlength="1" required autofocus>
+            </div>
+            <div class="mb-4">
+                <input class="input-default"
+                       type="password" id="password" autocomplete="current-password"
+                       name="password" placeholder="Password" minlength="6" required>
+            </div>
+            <div class="flex justify-between items-center">
+                <a href="reset-password" class="text-muted text-sm">
+                    Forgot password?
+                </a>
+                <div class="flex space-x-2">
+                    {{ if .AllowSignup }}
+                    <a href="signup">
+                        <button type="button" class="btn-default">Sign up</button>
+                    </a>
+                    {{ else }}
+                    <a title="The administrator of this instance has disabled sign up.">
+                        <button type="button" class="btn-disabled" disabled> Sign up </button>
+                    </a>
+                    {{ end }}
+                    <button type="submit" class="btn-primary">Log in</button>
+                </div>
+            </div>
+        </form>
+        {{ end }}
+
+        {{ if not .DisableWebAuthn }}
+        <div class="mb-8">
+            <div class="font-semibold mb-2 text-secondary">WebAuthn Login</div>
+            <form action="webauthn/login" method="post" class="mb-2">
+                <input type="hidden" name="assertion_json" id="webauthn_assertion_json">
+                <button type="button" class="btn-default w-full flex items-center justify-center" id="webauthn_login">
+                    <span class="iconify inline text-white text-base mr-1" data-icon="bi:key-fill"></span>
+                    Login with passkey
+                </button>
+            </form>
+        </div>
+        {{ end }}
+
+        {{ if len .OidcProviders }}
+        <div>
+            <div class="font-semibold mb-2 text-secondary">Single Sign-On</div>
+            {{ range $provider := .OidcProviders }}
+            <a href="oidc/{{ $provider.Name | lower }}/login" class="block mb-2">
+                <button type="button" class="btn-default w-full flex items-center gap-2 justify-center">
+                    {{ if $.OidcProviderIcon $provider.Name }}
+                    <span class="iconify inline text-white text-base" data-icon="{{ ($.OidcProviderIcon $provider.Name) | urlSafe }}"></span>
+                    {{ end }}
+                    Login with {{ $provider.DisplayName }}
+                </button>
+            </a>
+            {{ end }}
+        </div>
+        {{ end }}
+    </div>
+</main>
+
+{{ template "footer.tpl.html" . }}
+
+{{ template "foot.tpl.html" . }}
+</body>
+
+</html>

@@ -1,0 +1,152 @@
+package services
+
+import (
+	"log/slog"
+	"math/rand"
+	"time"
+
+	"github.com/duke-git/lancet/v2/datetime"
+	"github.com/duke-git/lancet/v2/slice"
+	"github.com/leandro-lugaresi/hub"
+	"github.com/muety/artifex/v2"
+	"github.com/muety/wakapi/config"
+	"github.com/muety/wakapi/models"
+	"github.com/muety/wakapi/utils"
+)
+
+// delay between evey report generation task (to throttle email sending frequency)
+const reportDelay = 10 * time.Second
+
+// past time range to cover in the report
+const reportRange = 7 * 24 * time.Hour
+
+type ReportService struct {
+	config         *config.Config
+	eventBus       *hub.Hub
+	summaryService ISummaryService
+	userService    IUserService
+	mailService    IMailService
+	rand           *rand.Rand
+	queueDefault   *artifex.Dispatcher
+	queueWorkers   *artifex.Dispatcher
+}
+
+func NewReportService(summaryService ISummaryService, userService IUserService, mailService IMailService) *ReportService {
+	srv := &ReportService{
+		config:         config.Get(),
+		eventBus:       config.EventBus(),
+		summaryService: summaryService,
+		userService:    userService,
+		mailService:    mailService,
+		rand:           rand.New(rand.NewSource(time.Now().Unix())),
+		queueDefault:   config.GetDefaultQueue(),
+		queueWorkers:   config.GetQueue(config.QueueReports),
+	}
+
+	return srv
+}
+
+func (srv *ReportService) Schedule() {
+	slog.Info("scheduling report generation")
+
+	scheduleUserReport := func(u *models.User) {
+		if err := srv.queueWorkers.Dispatch(func() {
+			t0 := time.Now()
+
+			if err := srv.SendReport(u, reportRange); err != nil {
+				config.Log().Error("failed to regenerate report", "userID", u.ID, "error", err)
+			}
+
+			// make the job take at least reportDelay seconds
+			if diff := reportDelay - time.Now().Sub(t0); diff > 0 {
+				slog.Debug("waiting before sending next report", "duration", diff)
+				time.Sleep(diff)
+			}
+		}); err != nil {
+			config.Log().Error("failed to dispatch report generation job for user", "userID", u.ID, "error", err)
+		}
+	}
+
+	_, err := srv.queueDefault.DispatchCron(func() {
+		// fetch all users with reports enabled
+		users, err := srv.userService.GetAllByReports(true)
+		if err != nil {
+			config.Log().Error("failed to get users for report generation", "error", err)
+			return
+		}
+
+		// filter users who have their email set
+		users = slice.Filter[*models.User](users, func(i int, u *models.User) bool {
+			return u.Email != ""
+		})
+
+		// schedule jobs, throttled by one job per x seconds
+		slog.Info("scheduling report generation", "userCount", len(users))
+		for _, u := range users {
+			scheduleUserReport(u)
+		}
+	}, srv.config.App.GetWeeklyReportCron())
+
+	if err != nil {
+		config.Log().Error("failed to dispatch report generation jobs", "error", err)
+	}
+}
+
+func (srv *ReportService) SendReport(user *models.User, duration time.Duration) error {
+	if user.Email == "" {
+		slog.Warn("not generating report as no e-mail address is set", "userID", user.ID)
+		return nil
+	}
+
+	slog.Info("generating report for user", "userID", user.ID)
+
+	end := time.Now().In(user.TZ())
+	start := time.Now().Add(-1 * duration)
+
+	fullSummary, err := srv.summaryService.Aliased(start, end, user, srv.summaryService.Retrieve, nil, nil, false)
+	if err != nil {
+		config.Log().Error("failed to regenerate report", "userID", user.ID, "error", err)
+		return err
+	}
+
+	// regenerate per-day summaries
+	dayIntervals := utils.SplitRangeByDays(start, end)
+	dailySummaries := make([]*models.Summary, len(dayIntervals))
+
+	for i, interval := range dayIntervals {
+		from, to := datetime.BeginOfDay(interval[0]), interval[1]
+		summary, err := srv.summaryService.Aliased(from, to, user, srv.summaryService.Retrieve, nil, nil, false)
+		if err != nil {
+			config.Log().Error("failed to regenerate day summary for report", "from", from, "to", to, "userID", user.ID, "error", err)
+			break
+		}
+		summary.FromTime = models.CustomTime(from)
+		summary.ToTime = models.CustomTime(to.Add(-1 * time.Second))
+		dailySummaries[i] = summary
+	}
+
+	if user.UnsubscribeToken == "" {
+		if _, err := srv.userService.GenerateUnsubscribeToken(user); err != nil {
+			config.Log().Error("failed to unsubscribe reset token for user", "user", user.ID, "error", err)
+			return err
+		} else {
+			slog.Info("generated new report unsubscribe token for user", "user", user.ID)
+		}
+	}
+
+	report := &models.Report{
+		From:           start,
+		To:             end,
+		User:           user,
+		Summary:        fullSummary,
+		DailySummaries: dailySummaries,
+	}
+
+	if err := srv.mailService.SendReport(user, report); err != nil {
+		config.Log().Error("failed to send report", "userID", user.ID, "error", err)
+		return err
+	}
+
+	slog.Info("sent report to user", "userID", user.ID)
+	return nil
+}

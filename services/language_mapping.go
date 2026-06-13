@@ -1,0 +1,99 @@
+package services
+
+import (
+	"errors"
+	"time"
+
+	"github.com/leandro-lugaresi/hub"
+	"github.com/muety/wakapi/config"
+	"github.com/muety/wakapi/models"
+	"github.com/muety/wakapi/repositories"
+	"github.com/patrickmn/go-cache"
+)
+
+/*
+ How language mappings work in Wakapi:
+ - Mappings are only applied during data retrieval, never at write time to prevent data loss. That is, incoming heartbeats will remain untouched when saved to the database.
+ - If a heartbeat has no language set (because couldn't be determined by wakatime-cli), it is tried to be resolved from global (see extensions.go) and user-specific mappings instead.
+ - User-defined mappings take precedence over global, server-defined mappings.
+*/
+
+type LanguageMappingService struct {
+	config     *config.Config
+	cache      *cache.Cache
+	eventBus   *hub.Hub
+	repository repositories.ILanguageMappingRepository
+}
+
+func NewLanguageMappingService(languageMappingsRepo repositories.ILanguageMappingRepository) *LanguageMappingService {
+	return &LanguageMappingService{
+		config:     config.Get(),
+		eventBus:   config.EventBus(),
+		repository: languageMappingsRepo,
+		cache:      cache.New(24*time.Hour, 24*time.Hour),
+	}
+}
+
+func (srv *LanguageMappingService) GetById(id uint) (*models.LanguageMapping, error) {
+	return srv.repository.GetById(id)
+}
+
+func (srv *LanguageMappingService) GetByUser(userId string) ([]*models.LanguageMapping, error) {
+	if mappings, found := srv.cache.Get(userId); found {
+		return mappings.([]*models.LanguageMapping), nil
+	}
+
+	mappings, err := srv.repository.GetByUser(userId)
+	if err != nil {
+		return nil, err
+	}
+	srv.cache.Set(userId, mappings, cache.DefaultExpiration)
+	return mappings, nil
+}
+
+func (srv *LanguageMappingService) ResolveByUser(userId string) (map[string]string, error) {
+	mappings := srv.getServerMappings()
+	userMappings, err := srv.GetByUser(userId)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, m := range userMappings {
+		mappings[m.Extension] = m.Language
+	}
+	return mappings, nil
+}
+
+func (srv *LanguageMappingService) Create(mapping *models.LanguageMapping) (*models.LanguageMapping, error) {
+	result, err := srv.repository.Insert(mapping)
+	if err != nil {
+		return nil, err
+	}
+
+	srv.cache.Delete(result.UserID)
+	srv.notifyUpdate(mapping)
+	return result, nil
+}
+
+func (srv *LanguageMappingService) Delete(mapping *models.LanguageMapping) error {
+	if mapping.UserID == "" {
+		return errors.New("no user id specified")
+	}
+	err := srv.repository.Delete(mapping.ID)
+	srv.cache.Delete(mapping.UserID)
+	srv.notifyUpdate(mapping)
+	return err
+}
+
+func (srv *LanguageMappingService) getServerMappings() map[string]string {
+	// https://dave.cheney.net/2017/04/30/if-a-map-isnt-a-reference-variable-what-is-it
+	return srv.config.App.GetCustomLanguages()
+}
+
+func (srv *LanguageMappingService) notifyUpdate(mapping *models.LanguageMapping) {
+	name := config.EventLanguageMappingsChanged
+	srv.eventBus.Publish(hub.Message{
+		Name:   name,
+		Fields: map[string]interface{}{config.FieldPayload: mapping, config.FieldUserId: mapping.UserID},
+	})
+}
