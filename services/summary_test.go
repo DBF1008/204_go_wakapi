@@ -826,6 +826,37 @@ func (suite *SummaryServiceTestSuite) TestSummaryService_HeartbeatCreateEvent_Sk
 	_ = sut
 }
 
+func (suite *SummaryServiceTestSuite) TestSummaryService_LanguageMappingsChangedEvent_InvalidatesUserCache() {
+	sut, eventBus := suite.createSut()
+
+	// language mappings are applied at read time, so a changed mapping must invalidate
+	// the affected user's already-cached summaries (and only theirs)
+	const otherUserId = "another-user-distinct" // must not be a sub-/superstring of TestUserId for the strings.Contains check
+	affectedKey := sut.getHash("2024-01-01", "2024-01-02", TestUserId, "--aliased")
+	otherKey := sut.getHash("2024-01-01", "2024-01-02", otherUserId, "--aliased")
+	sut.cache.SetDefault(affectedKey, &models.Summary{UserID: TestUserId})
+	sut.cache.SetDefault(otherKey, &models.Summary{UserID: otherUserId})
+
+	mapping := &models.LanguageMapping{UserID: TestUserId, Extension: "go", Language: TestLanguageGo}
+	eventBus.Publish(hub.Message{
+		Name: config.EventLanguageMappingsChanged,
+		Fields: map[string]interface{}{
+			config.FieldPayload: mapping,
+			config.FieldUserId:  mapping.UserID,
+		},
+	})
+
+	// the affected user's cache must be cleared asynchronously by the subscriber ...
+	assert.Eventually(suite.T(), func() bool {
+		_, found := sut.cache.Get(affectedKey)
+		return !found
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// ... while an unrelated user's cache must be left intact
+	_, otherFound := sut.cache.Get(otherKey)
+	assert.True(suite.T(), otherFound)
+}
+
 func (suite *SummaryServiceTestSuite) createSut() (*SummaryService, *hub.Hub) {
 	// This is a dirty, dirty hack and not thread-safe at all, but should do most of the time.
 	// Rationale: all services use a shared event hub for subscriptions to listen for events.

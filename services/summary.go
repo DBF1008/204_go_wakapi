@@ -81,6 +81,15 @@ func NewSummaryService(summaryRepo repositories.ISummaryRepository, heartbeatSer
 		}
 	}(&sub3)
 
+	// language mappings are applied at read time (see language_mapping.go), so a changed mapping
+	// makes already-cached summaries stale until natural expiry -> invalidate the affected user's cache
+	sub4 := srv.eventBus.Subscribe(0, config.EventLanguageMappingsChanged) // published from language mapping service
+	go func(sub *hub.Subscription) {
+		for m := range sub.Receiver {
+			srv.invalidateUserCache(m.Fields[config.FieldUserId].(string))
+		}
+	}(&sub4)
+
 	return srv
 }
 
