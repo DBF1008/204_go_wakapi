@@ -156,9 +156,12 @@ func (srv *LeaderboardService) CountUsers(excludeZero bool) (int64, error) {
 
 	count, err := srv.repository.CountUsers(excludeZero)
 	if err != nil {
-		srv.cache.SetDefault(cacheKey, count)
+		// don't cache on failure, otherwise a transient error (or its zero/half-baked
+		// count) would poison the cache and be served as a successful result for hours
+		return count, err
 	}
-	return count, err
+	srv.cache.SetDefault(cacheKey, count)
+	return count, nil
 }
 
 func (srv *LeaderboardService) GetByInterval(interval *models.IntervalKey, pageParams *utils.PageParams, resolveUsers bool) (models.Leaderboard, error) {
