@@ -155,7 +155,7 @@ func (srv *LeaderboardService) CountUsers(excludeZero bool) (int64, error) {
 	}
 
 	count, err := srv.repository.CountUsers(excludeZero)
-	if err != nil {
+	if err == nil {
 		srv.cache.SetDefault(cacheKey, count)
 	}
 	return count, err
