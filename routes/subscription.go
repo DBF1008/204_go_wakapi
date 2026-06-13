@@ -258,12 +258,27 @@ func (h *SubscriptionHandler) PostWebhook(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			return // status code already written
 		}
+
+		// Validate required fields before processing
+		if checkoutSession.ClientReferenceID == "" {
+			conf.Log().Request(r).Error("checkout session completed but ClientReferenceID is empty", "sessionID", checkoutSession.ID)
+			w.WriteHeader(http.StatusOK) // don't make stripe retry the event
+			return
+		}
+
+		if checkoutSession.Customer == nil || checkoutSession.Customer.ID == "" {
+			conf.Log().Request(r).Error("checkout session completed but customer info is missing", "sessionID", checkoutSession.ID, "clientReferenceID", checkoutSession.ClientReferenceID)
+			w.WriteHeader(http.StatusOK) // don't make stripe retry the event
+			return
+		}
+
 		slog.Info("received stripe checkout session event", "eventType", event.Type, "sessionID", checkoutSession.ID, "customerID", checkoutSession.Customer.ID, "customerEmail", checkoutSession.CustomerEmail)
 
 		user, err := h.userSrvc.GetUserById(checkoutSession.ClientReferenceID)
 		if err != nil {
-			conf.Log().Request(r).Error("failed to find user to update associated stripe customer", "userID", user.ID, "customerID", checkoutSession.Customer.ID)
-			return // status code already written
+			conf.Log().Request(r).Error("failed to find user to update associated stripe customer", "userID", checkoutSession.ClientReferenceID, "customerID", checkoutSession.Customer.ID, "error", err)
+			w.WriteHeader(http.StatusOK) // don't make stripe retry the event
+			return
 		}
 
 		if user.StripeCustomerId == "" {
@@ -275,6 +290,8 @@ func (h *SubscriptionHandler) PostWebhook(w http.ResponseWriter, r *http.Request
 			}
 		} else if user.StripeCustomerId != checkoutSession.Customer.ID {
 			conf.Log().Request(r).Error("invalid state: tried to associate user with stripe customer, but customer already assigned", "userID", user.ID, "newCustomerID", checkoutSession.Customer.ID, "existingCustomerID", user.StripeCustomerId)
+		} else {
+			slog.Info("user already associated with stripe customer, skipping", "userID", user.ID, "stripeCustomerID", user.StripeCustomerId)
 		}
 
 	default:
