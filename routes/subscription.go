@@ -258,24 +258,50 @@ func (h *SubscriptionHandler) PostWebhook(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			return // status code already written
 		}
-		slog.Info("received stripe checkout session event", "eventType", event.Type, "sessionID", checkoutSession.ID, "customerID", checkoutSession.Customer.ID, "customerEmail", checkoutSession.CustomerEmail)
+
+		// the customer is an expandable field and may be nil on malformed or unexpected events, so resolve it defensively
+		var customerID string
+		if checkoutSession.Customer != nil {
+			customerID = checkoutSession.Customer.ID
+		}
+
+		slog.Info("received stripe checkout session event", "eventType", event.Type, "sessionID", checkoutSession.ID, "customerID", customerID, "customerEmail", checkoutSession.CustomerEmail)
+
+		// the client reference id carries our internal user id (set when the checkout session was created)
+		if checkoutSession.ClientReferenceID == "" {
+			conf.Log().Request(r).Error("stripe checkout session event without client reference id, cannot associate customer with a user", "sessionID", checkoutSession.ID, "customerID", customerID)
+			w.WriteHeader(http.StatusOK) // non-retryable: nothing links this session to a user, so retrying won't help
+			return
+		}
+
+		if customerID == "" {
+			conf.Log().Request(r).Error("stripe checkout session event without customer, cannot associate it with a user", "sessionID", checkoutSession.ID, "userID", checkoutSession.ClientReferenceID)
+			w.WriteHeader(http.StatusOK) // non-retryable: no customer to associate
+			return
+		}
 
 		user, err := h.userSrvc.GetUserById(checkoutSession.ClientReferenceID)
 		if err != nil {
-			conf.Log().Request(r).Error("failed to find user to update associated stripe customer", "userID", user.ID, "customerID", checkoutSession.Customer.ID)
-			return // status code already written
+			// NOTE: user is nil here, so log the resolved id from the event rather than user.ID (which would panic)
+			conf.Log().Request(r).Error("failed to find user to update associated stripe customer", "userID", checkoutSession.ClientReferenceID, "customerID", customerID, "error", err)
+			w.WriteHeader(http.StatusOK) // non-retryable: the referenced user does not exist
+			return
 		}
 
 		if user.StripeCustomerId == "" {
-			user.StripeCustomerId = checkoutSession.Customer.ID
+			user.StripeCustomerId = customerID
 			if _, err := h.userSrvc.Update(user); err != nil {
-				conf.Log().Request(r).Error("failed to update stripe customer id for user", "customerID", checkoutSession.Customer.ID, "userID", user.ID, "error", err)
-			} else {
-				slog.Info("associated user with stripe customer", "userID", user.ID, "stripeCustomerID", checkoutSession.Customer.ID)
+				conf.Log().Request(r).Error("failed to update stripe customer id for user", "customerID", customerID, "userID", user.ID, "error", err)
+				w.WriteHeader(http.StatusInternalServerError) // transient persistence failure: let stripe retry so the association is not lost
+				return
 			}
-		} else if user.StripeCustomerId != checkoutSession.Customer.ID {
-			conf.Log().Request(r).Error("invalid state: tried to associate user with stripe customer, but customer already assigned", "userID", user.ID, "newCustomerID", checkoutSession.Customer.ID, "existingCustomerID", user.StripeCustomerId)
+			slog.Info("associated user with stripe customer", "userID", user.ID, "stripeCustomerID", customerID)
+		} else if user.StripeCustomerId != customerID {
+			conf.Log().Request(r).Error("invalid state: tried to associate user with stripe customer, but customer already assigned", "userID", user.ID, "newCustomerID", customerID, "existingCustomerID", user.StripeCustomerId)
+			w.WriteHeader(http.StatusOK) // non-retryable: do not overwrite an existing, different customer association
+			return
 		}
+		// else: user is already associated with this same customer → idempotent no-op, falls through to the 200 below
 
 	default:
 		slog.Warn("got stripe event with no handler defined", "eventType", event.Type)
