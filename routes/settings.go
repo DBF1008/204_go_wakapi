@@ -849,6 +849,26 @@ func (h *SettingsHandler) actionClearData(w http.ResponseWriter, r *http.Request
 		if err := h.heartbeatSrvc.DeleteByUser(user); err != nil {
 			conf.Log().Request(r).Error("failed to clear heartbeats", "error", err)
 		}
+
+		// Re-fetch the user to avoid overwriting concurrent updates, then
+		// reset the HasData flag so that downstream logic (inactive-user
+		// housekeeping, settings page rendering, etc.) sees a consistent
+		// state. The Update call also flushes the user cache and fires an
+		// EventUserUpdate, which takes care of derived state such as the
+		// leaderboard.
+		latestUser, err := h.userSrvc.GetUserById(user.ID)
+		if err != nil {
+			conf.Log().Request(r).Error("failed to re-fetch user after clearing data", "userID", user.ID, "error", err)
+			return
+		}
+		if latestUser.HasData {
+			latestUser.HasData = false
+			if _, err := h.userSrvc.Update(latestUser); err != nil {
+				conf.Log().Request(r).Error("failed to reset 'has_data' flag for user", "userID", latestUser.ID, "error", err)
+			}
+		}
+
+		slog.Info("successfully cleared all data for user", "userID", user.ID)
 	}(user, r)
 
 	return actionResult{http.StatusAccepted, "deletion in progress, this may take a couple of seconds", "", nil}
