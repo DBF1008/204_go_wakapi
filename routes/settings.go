@@ -730,8 +730,18 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 	go func(user *models.User, importer *imports.WakatimeImporter, r *http.Request) {
 		start := time.Now()
 
+		// Recover from any panic in the import pipeline so that a mid-import failure
+		// neither crashes the server nor (since the success marker is only written at
+		// the very end of a clean run) leaves this import recorded as successful.
+		defer func() {
+			if rec := recover(); rec != nil {
+				conf.Log().Request(r).Error("wakatime import for user panicked", "userID", user.ID, "error", rec)
+			}
+		}()
+
 		countBefore, _ := h.heartbeatSrvc.CountByUser(user)
 
+		// --- start: open the import stream (incremental if a previous import exists) ---
 		var (
 			stream      <-chan *models.Heartbeat
 			importError error
@@ -743,22 +753,22 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 			stream, importError = importer.Import(user, latest.Time.T(), time.Now())
 		}
 		if importError != nil {
-			conf.Log().Error("wakatime import for user failed", "userID", user.ID, "error", importError)
+			conf.Log().Request(r).Error("wakatime import for user failed to start", "userID", user.ID, "error", importError)
 			return
 		}
+		slog.Info("wakatime import for user started", "userID", user.ID)
 
-		// import successful
-		h.keyValueSrvc.PutString(&models.KeyStringValue{
-			Key:   kvKeyLastImportSuccess,
-			Value: time.Now().Format(time.RFC822),
-		})
-
+		// --- core: download heartbeats and persist them in batches ---
 		count := 0
+		insertErrored := false
 		batch := make([]*models.Heartbeat, 0, h.config.App.ImportBatchSize)
 
 		insert := func(batch []*models.Heartbeat) {
+			// duplicates are silently ignored at the db level (on-conflict-do-nothing),
+			// so an error here is a genuine persistence failure, not an existing heartbeat
 			if err := h.heartbeatSrvc.InsertBatch(batch); err != nil {
-				slog.Warn("failed to insert imported heartbeat, already existing?", "error", err)
+				insertErrored = true
+				slog.Warn("failed to insert imported heartbeat batch", "userID", user.ID, "error", err)
 			}
 		}
 
@@ -778,7 +788,27 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 		countAfter, _ := h.heartbeatSrvc.CountByUser(user)
 		slog.Info("downloaded heartbeats for user", "count", count, "userID", user.ID, "importedCount", countAfter-countBefore)
 
-		h.regenerateSummaries(user)
+		// If any batch failed to persist, the imported data is incomplete. Treat this as a
+		// partial failure: skip the (expensive) summary regeneration and, crucially, do not
+		// record a successful import. The short backoff (last_import) stays in effect, but the
+		// long ImportMaxRate lockout (last_successful_import) is not triggered, so the user can
+		// retry and the incremental import will pick up the heartbeats that did not make it in.
+		if insertErrored {
+			conf.Log().Request(r).Error("wakatime import for user partially failed: some heartbeat batches could not be persisted", "userID", user.ID)
+			return
+		}
+
+		// --- core: rebuild summaries from the freshly imported heartbeats ---
+		if err := h.regenerateSummaries(user); err != nil {
+			conf.Log().Request(r).Error("wakatime import for user failed to regenerate summaries", "userID", user.ID, "error", err)
+			return
+		}
+
+		// --- the core import chain completed successfully: only now record the success ---
+		h.keyValueSrvc.PutString(&models.KeyStringValue{
+			Key:   kvKeyLastImportSuccess,
+			Value: time.Now().Format(time.RFC822),
+		})
 
 		if !user.HasData {
 			user.HasData = true
@@ -787,6 +817,9 @@ func (h *SettingsHandler) actionImportWakatime(w http.ResponseWriter, r *http.Re
 			}
 		}
 
+		slog.Info("wakatime import for user completed successfully", "userID", user.ID, "importedCount", countAfter-countBefore)
+
+		// notification mail is a non-critical side effect: a failure here does not undo the import
 		if user.Email != "" {
 			if err := h.mailSrvc.SendImportNotification(user, time.Now().Sub(start), int(countAfter-countBefore)); err != nil {
 				conf.Log().Request(r).Error("failed to send import notification mail", "userID", user.ID, "error", err)
